@@ -2263,6 +2263,7 @@ static unsigned present_ticks(const win_t *o);
 extern void runtime_frame_step_update(uint64_t now_ns) __attribute__((weak_import));
 extern void movie_host_tick(void) __attribute__((weak_import));   /* TOTK runtime/movie_host.c: pre-rendered cutscenes at their own frame rate */
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // 宿主 hle_thread.c 提供真值；图形单测里为 0 | The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
+__attribute__((weak)) void dm_gate_wait_stats(uint64_t *n) { *n = 0; }   // 宿主 threads.c 提供真值 | The host's threads.c provides the ground truth
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 extern uint32_t mtl_present_qos(void);
 uint64_t g_frame_pub;
@@ -2386,8 +2387,9 @@ static void tsummary(uint64_t frame) {
     }
     LOG("[nvn] timing through frame %llu:%s", frame, line);
     { unsigned n = g_tn[0] < TWIN ? g_tn[0] : TWIN, over = 0; double v[TWIN];   // 帧间隔另起一行（M1 基线）：本窗口 > 16.7 ms 帧数与 p99 | frame interval gets its own line (M1 baseline): number of frames > 16.7 ms in this window and p99
-      if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > 16.7;
-        LOG("[nvn] frame intervals through frame %llu: >16.7 ms for %u / %u frames, p99 %.2f ms", frame, over, n, v[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1]); } }
+      if (n) { memcpy(v, g_tw[0], n * sizeof *v); qsort(v, n, sizeof *v, dcmp); for (unsigned i = 0; i < n; i++) over += v[i] > 16.7;   // 同一次排序取分位数：p50 / p95 / p99 / max，不加锁 | percentiles come from the same sort: p50 / p95 / p99 / max, no lock
+        LOG("[nvn] frame intervals through frame %llu: >16.7 ms for %u / %u frames, p50 %.2f / p95 %.2f / p99 %.2f / max %.2f ms", frame, over, n,
+            v[n / 2], v[(n * 95) / 100 < n ? (n * 95) / 100 : n - 1], v[(n * 99) / 100 < n ? (n * 99) / 100 : n - 1], v[n - 1]); } }
     { unsigned n = g_presn < TWIN ? g_presn : TWIN, k = 0, drop = 0, discard = 0; double v[TWIN];   // 上屏：掉帧 = 间隔 > 16.7 × 1.5 ms 或被丢弃 | on-screen present: dropped frame = interval > 16.7 × 1.5 ms or discarded
       for (unsigned i = 0; i < n; i++) { double x = g_pres_iv[i]; if (x < 0) { drop++; discard++; } else if (x > 0) { v[k++] = x; drop += x > 25.0; } }
       task_vm_info_data_t vi; mach_msg_type_number_t vc = TASK_VM_INFO_COUNT; double fp = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &vc) == KERN_SUCCESS ? vi.phys_footprint / 1048576.0 : -1;
@@ -2416,6 +2418,9 @@ static void tsummary(uint64_t frame) {
         { static uint64_t pun, puns; uint64_t un = 0, uns = 0; void mtl_upload_wait_stats(uint64_t *, uint64_t *); mtl_upload_wait_stats(&un, &uns);
           if (pf && frame > pf) LOG("[nvn] upload-slot waits through frame %llu: %.2f/frame / %.3f ms", frame, (double)(un - pun) / (double)(frame - pf), (double)(uns - puns) / 1e6 / (double)(frame - pf));
           pun = un; puns = uns; }
+        { static uint64_t pgw; uint64_t gw = 0; dm_gate_wait_stats(&gw);
+          if (pf && frame > pf) LOG("[nvn] gate waits through frame %llu: %.2f/frame", frame, (double)(gw - pgw) / (double)(frame - pf));
+          pgw = gw; }
         { static uint64_t pcc; uint64_t mtl_chunk_commits(void), cc = mtl_chunk_commits();
           if (pf && frame > pf) LOG("[nvn] split submissions through frame %llu: %.2f extra segments/frame", frame, (double)(cc - pcc) / (double)(frame - pf));
           pcc = cc; }
