@@ -18,7 +18,8 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
 typedef struct { uintptr_t base, end; _Atomic uint64_t *gen; _Atomic int live, watched; _Atomic uint64_t epoch; } range_t;   // watched: the OS reports its writes
 static range_t g_r[MAX_RANGE];
 static _Atomic int g_nr, g_live, g_live_peak;
-static _Atomic uint64_t g_now = 1, g_adds_total, g_scans, g_scan_pages;
+static _Atomic uint64_t g_now = 1, g_adds_total, g_scans, g_scan_pages, g_scan_ns, g_scan_full;   // g_scan_full: scans that filled the buffer
+uint64_t plat_now_ns(void);
 static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;
 static int g_watch = -1;   // write watch available (the window was reserved with it)
 
@@ -57,7 +58,9 @@ static void scan_pages(range_t *r, uintptr_t a, size_t len, int count) {
     if (lo < r->base) lo = r->base;
     if (hi > r->end) hi = r->end;
     while (lo < hi) {
+        uint64_t t0 = plat_now_ns();
         int n = plat_written_pages(lo, hi - lo, pages, 512, &pg);
+        atomic_fetch_add(&g_scan_ns, plat_now_ns() - t0);
         if (n < 0) {   // this range only (it used to switch tracking off for every pool, silently)
             if (atomic_exchange(&r->watched, 0)) {
                 static _Atomic int said;
@@ -71,8 +74,16 @@ static void scan_pages(range_t *r, uintptr_t a, size_t len, int count) {
             uintptr_t p = (pages[i] - r->base) / 4096;
             if (count) atomic_store(&r->gen[p], g);
         }
+        if (n == 512) {
+            /* The buffer filled: plat_written_pages reset the whole range's watch bits, so the pages it could not
+               report are lost to a rescan. Take the whole range as written (more copying, never stale data). */
+            if (count) for (uintptr_t p = lo; p < hi; p += 4096) atomic_store(&r->gen[(p - r->base) / 4096], g);
+            atomic_fetch_add(&g_scan_pages, (uint64_t)((hi - lo) / 4096));
+            atomic_fetch_add(&g_scan_full, 1);
+            break;
+        }
         atomic_fetch_add(&g_scan_pages, (uint64_t)n);
-        if (n < 512) break;   // all of the range reported; with 512 there may be more: scan again (bits were reset)
+        break;   // all of the range reported
     }
 }
 
@@ -177,7 +188,8 @@ void nvn_dirty_gpu_write_end(void *tok) {
 int nvn_dirty_recent(uintptr_t lo, uintptr_t hi, nvn_dirty_rec *out, int max) { (void)lo; (void)hi; (void)out; (void)max; return 0; }
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }
 void nvn_dirty_stats(uint64_t *faults, uint64_t *preps) { *faults = atomic_load(&g_scan_pages); *preps = 0; }
-void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) { *calls = atomic_load(&g_scans); *pages = atomic_load(&g_scan_pages); *ns = 0; }
+void nvn_dirty_mp_stats(uint64_t *calls, uint64_t *pages, uint64_t *ns) { *calls = atomic_load(&g_scans); *pages = atomic_load(&g_scan_pages); *ns = atomic_load(&g_scan_ns); }
+uint64_t nvn_dirty_full_scans(void) { return atomic_load(&g_scan_full); }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     *live = atomic_load(&g_live); *used_slots = atomic_load(&g_nr); *adds_total = atomic_load(&g_adds_total);
 }
