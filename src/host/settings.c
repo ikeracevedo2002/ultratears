@@ -13,6 +13,7 @@ static void defaults(settings_t *s) {
     s->fullscreen = 0;
     s->vsync = 0;
     s->mailbox = 1;
+    s->render_scale = 100;
 }
 
 void settings_load(settings_t *s) {
@@ -31,6 +32,7 @@ void settings_load(settings_t *s) {
         else if (!strcmp(line, "fullscreen")) s->fullscreen = v != 0;
         else if (!strcmp(line, "vsync")) s->vsync = v != 0;
         else if (!strcmp(line, "mailbox")) s->mailbox = v != 0;
+        else if (!strcmp(line, "render_scale") && (v == 50 || v == 75 || v == 100)) s->render_scale = (int)v;
     }
     fclose(f);
 }
@@ -44,5 +46,6 @@ void settings_save(const settings_t *s) {
     fprintf(f, "# UltraTears graphics settings (F1 in the game)\n");
     fprintf(f, "width=%d\nheight=%d\n", s->width, s->height);
     fprintf(f, "fullscreen=%d\nvsync=%d\nmailbox=%d\n", s->fullscreen, s->vsync, s->mailbox);
+    fprintf(f, "render_scale=%d\n", s->render_scale);
     fclose(f);
 }
