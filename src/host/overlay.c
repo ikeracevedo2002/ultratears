@@ -9,10 +9,13 @@
 #define ADVANCE (6 * SCALE)   // a glyph is 5 columns and one space wide
 #define ROW_H 36
 
-enum { ROW_RES, ROW_WINDOW, ROW_VSYNC, ROW_MAILBOX, ROW_QUIT, ROWS };
+enum { ROW_RES, ROW_WINDOW, ROW_VSYNC, ROW_MAILBOX, ROW_SCALE, ROW_QUIT, ROWS };
 
 static const int presets[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
 #define PRESETS ((int)(sizeof presets / sizeof *presets))
+
+static const int scales[] = {100, 75, 50};
+#define SCALES ((int)(sizeof scales / sizeof *scales))
 
 static int shown, row;
 static uint32_t px[OVERLAY_W * OVERLAY_H];
@@ -110,6 +113,14 @@ overlay_event_t overlay_key(overlay_key_t k, settings_t *s) {
     case ROW_WINDOW: s->fullscreen = !s->fullscreen; break;
     case ROW_VSYNC: s->vsync = !s->vsync; break;
     case ROW_MAILBOX: s->mailbox = !s->mailbox; break;
+    case ROW_SCALE: {
+        int i = 0;
+        for (int p = 0; p < SCALES; p++)
+            if (scales[p] == s->render_scale) i = p;
+        i = (i + dir + SCALES) % SCALES;
+        s->render_scale = scales[i];
+        break;
+    }
     }
     return OVL_CHANGED;
 }
@@ -139,6 +150,7 @@ uint32_t *overlay_render(const settings_t *s, int *w, int *h) {
         case ROW_WINDOW: snprintf(label, sizeof label, "WINDOW MODE  %s", s->fullscreen ? "FULLSCREEN" : "WINDOWED"); break;
         case ROW_VSYNC: snprintf(label, sizeof label, "VSYNC  %s", s->vsync ? "ON" : "OFF"); break;
         case ROW_MAILBOX: snprintf(label, sizeof label, "MAILBOX  %s", s->mailbox ? "ON" : "OFF"); break;
+        case ROW_SCALE: snprintf(label, sizeof label, "RENDER SCALE  %d PERCENT", s->render_scale); break;
         default: snprintf(label, sizeof label, "QUIT TO DESKTOP"); break;
         }
         text(32, y + 8, label, c);
