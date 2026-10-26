@@ -270,6 +270,25 @@ static VkSamplerAddressMode wrap(uint8_t w) {
     default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;   // CLAMP (GL legacy), CLAMP_TO_EDGE
     }
 }
+// Samplers made for a registration that changed during the lookup: no cache slot takes them, so they are destroyed
+// once the GPU has finished the submissions that could bind them (fence-gated, as in vkb_shadow.c). Write lock held.
+typedef struct { VkSampler s; uint64_t fence; } orphan_t;
+static orphan_t *g_orphan;
+static int g_norphan, g_caporphan;
+static void orphan_sampler(VkSampler s) {
+    for (int k = 0; k < g_norphan;) {
+        if (!mtl_wait(g_orphan[k].fence, 0)) { k++; continue; }
+        vk.vkDestroySampler(vkc.device, g_orphan[k].s, NULL);
+        g_orphan[k] = g_orphan[--g_norphan];
+    }
+    if (g_norphan == g_caporphan) {
+        g_caporphan = g_caporphan ? g_caporphan * 2 : 16;
+        g_orphan = realloc(g_orphan, (size_t)g_caporphan * sizeof *g_orphan);
+        if (!g_orphan) die("sampler orphans");
+    }
+    g_orphan[g_norphan++] = (orphan_t){s, mtl_last_fence() + 1};
+}
+
 static VkSampler sampler(int id) {
     static VkSampler fallback;   // made before threads record (vkb_draw_mt_init)
     vkb_rw_read(&g_reg_mu, LK_TEXREG);
@@ -321,8 +340,9 @@ static VkSampler sampler(int id) {
         vk.vkDestroySampler(vkc.device, s, NULL);
         return other;
     }
+    else orphan_sampler(s);   // the registration changed: the caller still binds s this once
     vkb_rw_write_end(&g_reg_mu);
-    return s;   // [temporary] a sampler re-registered meanwhile leaks this one
+    return s;
 }
 
 // A 1x1 black image for unbound texture slots, one per view type. Created (cleared) outside a pass: dummy_init.
