@@ -56,7 +56,9 @@ void runtime_input_clear(void) {
 
 /* TOTK_INPUT_SCRIPT=<frame>:<key>[*<frames held>],... (development: drive the game without a person, e.g.
    "520:J,700:J*30,900:W*120"). Frames are the graphics frontend's frames; keys are named as on the keyboard
-   (A-Z, RETURN, SPACE, TAB, ESCAPE, UP, DOWN, LEFT, RIGHT, LSHIFT, LALT) and go through the same layout as typing. */
+   (A-Z, RETURN, SPACE, TAB, ESCAPE, UP, DOWN, LEFT, RIGHT, LSHIFT, LALT) and go through the same layout as typing.
+   An entry starting with t is in seconds of real time since the first frame instead: "t70:J,t95:W*2.5" presses J at
+   70 s and holds W from 95 s for 2.5 s, the same wall-clock input at any frame rate (for game-speed checks). */
 static int script_code(const char *k, size_t n) {
     static const struct { const char *name; int code; } named[] = {
         {"RETURN", 36}, {"SPACE", 49}, {"TAB", 48}, {"ESCAPE", 53}, {"UP", 126}, {"DOWN", 125}, {"LEFT", 123},
@@ -70,9 +72,24 @@ static int script_code(const char *k, size_t n) {
 void runtime_input_script_tick(uint64_t frame) {
     static const char *script;
     static int init;
-    if (!init) { init = 1; script = getenv("TOTK_INPUT_SCRIPT"); }
+    static uint64_t t0, prev_ns;
+    if (!init) { init = 1; script = getenv("TOTK_INPUT_SCRIPT"); t0 = plat_now_ns(); }
+    uint64_t now_ns = plat_now_ns() - t0;
     for (const char *p = script; p && *p;) {
         char *end;
+        if (*p == 't') {   // real-time entry: press when the clock passes its time, release after its hold in seconds
+            double at_s = strtod(p + 1, &end);
+            const char *k = *end == ':' ? end + 1 : end;
+            size_t n = strcspn(k, "*,");
+            double hold_s = k[n] == '*' ? strtod(k + n + 1, NULL) : 0.2;
+            uint64_t on = (uint64_t)(at_s * 1e9), off = (uint64_t)((at_s + hold_s) * 1e9);
+            int code = script_code(k, n);
+            if (code >= 0 && prev_ns < on && now_ns >= on) { fprintf(stderr, "[totk] input script: %.3f s (frame %llu) press %.*s\n", now_ns / 1e9, (unsigned long long)frame, (int)n, k); runtime_input_key((unsigned)code, 1); }
+            if (code >= 0 && prev_ns < off && now_ns >= off) { fprintf(stderr, "[totk] input script: %.3f s (frame %llu) release %.*s\n", now_ns / 1e9, (unsigned long long)frame, (int)n, k); runtime_input_key((unsigned)code, 0); }
+            p = strchr(k, ',');
+            if (p) p++;
+            continue;
+        }
         uint64_t at = strtoull(p, &end, 10);
         const char *k = *end == ':' ? end + 1 : end;
         size_t n = strcspn(k, "*,");
@@ -83,6 +100,7 @@ void runtime_input_script_tick(uint64_t frame) {
         p = strchr(k, ',');
         if (p) p++;
     }
+    prev_ns = now_ns;
 }
 
 static void initialize(void) {
