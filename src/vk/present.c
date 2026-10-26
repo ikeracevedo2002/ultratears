@@ -403,6 +403,56 @@ void vkp_overlay(const uint32_t *bgra, int w, int h) {
     pthread_mutex_unlock(&mu);
 }
 
+// The push constants of the two passes, laid out as the shaders' Push blocks.
+typedef struct { float src_origin[2], src_extent[2]; int32_t dst_extent[2], mode; } easu_push_t;
+typedef struct { int32_t extent[2]; float sharp; } rcas_push_t;
+#define UPSCALE_MODE_EASU 2      // the FSR1-path clamp (1 is plain Catmull-Rom)
+#define UPSCALE_SHARP 0.2f       // RCAS strength
+
+// The game's crop (sx, sy, sw, sh) scaled to dw x dh by EASU and sharpened by RCAS. The result is the slot's RCAS
+// output, left in TRANSFER_SRC layout for the blit into the window. The caller checks targets_ready first.
+static void upscale_record(VkCommandBuffer cb, unsigned slot, out_t *out, int sx, int sy, int sw, int sh, int dw, int dh) {
+    VkDescriptorImageInfo src = {VK_NULL_HANDLE, out->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo easu_dst = {VK_NULL_HANDLE, up_view[slot][0], VK_IMAGE_LAYOUT_GENERAL};
+    VkDescriptorImageInfo rcas_dst = {VK_NULL_HANDLE, up_view[slot][1], VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w[4] = {
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = easu_set[slot], .dstBinding = 0, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &src},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = easu_set[slot], .dstBinding = 1, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &easu_dst},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = rcas_set[slot], .dstBinding = 0, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &easu_dst},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = rcas_set[slot], .dstBinding = 1, .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &rcas_dst}};
+    vk.vkUpdateDescriptorSets(vkc.device, 4, w, 0, NULL);   // the slot's fence has passed: its sets are free
+
+    VkImage easu_img = up_img[slot][0], rcas_img = up_img[slot][1];
+    barrier(cb, easu_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    barrier(cb, out->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    vk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, easu_pipe);
+    vk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, easu_pl, 0, 1, &easu_set[slot], 0, NULL);
+    easu_push_t ep = {{(float)sx, (float)sy}, {(float)sw, (float)sh}, {dw, dh}, UPSCALE_MODE_EASU};
+    vk.vkCmdPushConstants(cb, easu_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof ep, &ep);
+    vk.vkCmdDispatch(cb, (uint32_t)(dw + 7) / 8, (uint32_t)(dh + 7) / 8, 1);
+
+    barrier(cb, easu_img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    barrier(cb, out->img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    barrier(cb, rcas_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    vk.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, rcas_pipe);
+    vk.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, rcas_pl, 0, 1, &rcas_set[slot], 0, NULL);
+    rcas_push_t rp = {{dw, dh}, UPSCALE_SHARP};
+    vk.vkCmdPushConstants(cb, rcas_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof rp, &rp);
+    vk.vkCmdDispatch(cb, (uint32_t)(dw + 7) / 8, (uint32_t)(dh + 7) / 8, 1);
+
+    barrier(cb, rcas_img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+}
+
 // One window frame: the newest game frame (out, may be NULL: the cycling colour) fitted with its aspect ratio.
 static int present_one(uint64_t n, unsigned slot, out_t *out) {
     if (atomic_exchange(&resized, 0) || !swapchain) {
@@ -434,10 +484,20 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
         int dw = (int)(sw * scale + 0.5), dh = (int)(sh * scale + 0.5), dx = ((int)extent.width - dw) / 2, dy = ((int)extent.height - dh) / 2;
         barrier(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImage src_img = out->img;
         VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}},
                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
-        vk.vkCmdBlitImage(cb, out->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          1, &b, VK_FILTER_LINEAR);
+        VkFilter filter = VK_FILTER_LINEAR;
+        if (targets_ready && out->view && dw > 0 && dh > 0) {   // the upscale passes; else the linear blit of the crop
+            upscale_record(cb, slot, out, sx, sy, sw, sh, dw, dh);
+            // the sharpened picture sits at the origin of the slot's RCAS output, so it lands 1:1 in the window
+            src_img = up_img[slot][1];
+            b.srcOffsets[0] = (VkOffset3D){0, 0, 0};
+            b.srcOffsets[1] = (VkOffset3D){dw, dh, 1};
+            filter = VK_FILTER_NEAREST;
+        }
+        vk.vkCmdBlitImage(cb, src_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          1, &b, filter);
     }
     int ow, oh;
     if (overlay_upload(slot, &ow, &oh)) {   // the settings panel, centred over the picture
