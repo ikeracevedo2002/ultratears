@@ -1,0 +1,31 @@
+#version 450
+// Sharpening pass that runs after upscale_easu.comp on the FSR1 path. It is a
+// contrast-limited Laplacian: the sharpened value is clamped to the range of the
+// four edge neighbours, so bright or dark halos cannot overshoot.
+// Compile command and SPIR-V embedding: see upscale_spv.h.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba8) uniform readonly image2D src;
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D dst;
+
+layout(push_constant) uniform Push {
+    ivec2 extent;   // size of the image, in texels
+    float sharp;    // strength of the Laplacian term
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.extent.x || p.y >= pc.extent.y) return;
+
+    vec3 c = imageLoad(src, p).rgb;
+    vec3 n = imageLoad(src, clamp(p + ivec2(0, -1), ivec2(0), pc.extent - 1)).rgb;
+    vec3 s = imageLoad(src, clamp(p + ivec2(0, 1), ivec2(0), pc.extent - 1)).rgb;
+    vec3 e = imageLoad(src, clamp(p + ivec2(1, 0), ivec2(0), pc.extent - 1)).rgb;
+    vec3 w = imageLoad(src, clamp(p + ivec2(-1, 0), ivec2(0), pc.extent - 1)).rgb;
+
+    vec3 lap = 4.0 * c - n - s - e - w;
+    vec3 lo = min(c, min(min(n, s), min(e, w)));
+    vec3 hi = max(c, max(max(n, s), max(e, w)));
+    vec3 col = clamp(c + pc.sharp * lap, lo, hi);
+    imageStore(dst, p, vec4(col, 1.0));
+}
