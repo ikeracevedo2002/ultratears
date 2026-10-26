@@ -29,3 +29,6 @@ void vkp_out_ready(int slot, VkSemaphore timeline, uint64_t value, const int cro
 void vkp_overlay(const uint32_t *bgra, int w, int h);
 // Present mode for the next frame: vsync on = FIFO, vsync off with mailbox = MAILBOX, else IMMEDIATE when the surface has it.
 void vkp_set_present(int vsync, int mailbox);
+// Render scale in percent (1..100) for the EASU/RCAS upscale: the passes run at this share of the window's fitted size,
+// then the blit stretches them to it. The linear fallback ignores it.
+void vkp_set_render_scale(int percent);

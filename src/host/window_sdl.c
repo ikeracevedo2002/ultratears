@@ -102,6 +102,7 @@ int window_init(void) {
     if (!vkp_init(window))
         runtime_fail("Vulkan initialization failed (Vulkan 1.3 with VK_EXT_shader_object is required)");
     vkp_set_present(cfg.vsync, cfg.mailbox);
+    vkp_set_render_scale(cfg.render_scale);
     if (cfg.fullscreen) SDL_SetWindowFullscreen(window, true);
     return 1;
 }
@@ -184,6 +185,7 @@ static void overlay_apply(void) {
     SDL_SetWindowFullscreen(window, cfg.fullscreen);
     if (!cfg.fullscreen) SDL_SetWindowSize(window, cfg.width, cfg.height);
     vkp_set_present(cfg.vsync, cfg.mailbox);
+    vkp_set_render_scale(cfg.render_scale);
     settings_save(&cfg);
 }
 // The panel's keys: arrows move and change a row, Enter picks, Escape or F1 closes.

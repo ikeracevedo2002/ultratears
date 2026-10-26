@@ -37,6 +37,7 @@ static uint64_t frames_in;           // under mu
 static _Atomic uint64_t presented;
 static _Atomic int resized;
 static _Atomic int want_vsync = 0, want_mailbox = 1;   // set by vkp_set_present; the swapchain is rebuilt in that mode
+static _Atomic int want_scale = 100;                   // render_scale percent, set by vkp_set_render_scale
 
 // Command buffers and sync objects of the present thread (the device is vk.c's).
 static int create_present_objects(void) {
@@ -482,6 +483,9 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
         if (sw <= 0 || sh <= 0 || sx + sw > (int)out->w || sy + sh > (int)out->h) { sx = sy = 0; sw = (int)out->w; sh = (int)out->h; }
         double scale = (double)extent.width / sw < (double)extent.height / sh ? (double)extent.width / sw : (double)extent.height / sh;
         int dw = (int)(sw * scale + 0.5), dh = (int)(sh * scale + 0.5), dx = ((int)extent.width - dw) / 2, dy = ((int)extent.height - dh) / 2;
+        // render_scale: the upscale passes run at this share of the window's size; the blit below scales them back up
+        int pct = atomic_load(&want_scale);
+        int rw = dw * pct / 100 > 0 ? dw * pct / 100 : 1, rh = dh * pct / 100 > 0 ? dh * pct / 100 : 1;
         barrier(cb, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                 VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         VkImage src_img = out->img;
@@ -492,15 +496,15 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
         static int path_logged;   // one line per run: which present path the game frames take
         if (!path_logged) {
             path_logged = 1;
-            LOG("present: %s, crop %dx%d -> %dx%d in a %ux%u window", upscale ? "EASU + RCAS" : "linear blit",
-                sw, sh, dw, dh, extent.width, extent.height);
+            LOG("present: %s, crop %dx%d -> %dx%d (render %dx%d, %d%%) in a %ux%u window", upscale ? "EASU + RCAS" : "linear blit",
+                sw, sh, dw, dh, rw, rh, pct, extent.width, extent.height);
         }
         if (upscale) {   // the upscale passes; else the linear blit of the crop
-            upscale_record(cb, slot, out, sx, sy, sw, sh, dw, dh);
-            // the sharpened picture sits at the origin of the slot's RCAS output, so it lands 1:1 in the window
+            upscale_record(cb, slot, out, sx, sy, sw, sh, rw, rh);
+            // the sharpened picture sits at the origin of the slot's RCAS output; NEAREST stretches it to the window
             src_img = up_img[slot][1];
             b.srcOffsets[0] = (VkOffset3D){0, 0, 0};
-            b.srcOffsets[1] = (VkOffset3D){dw, dh, 1};
+            b.srcOffsets[1] = (VkOffset3D){rw, rh, 1};
             filter = VK_FILTER_NEAREST;
         }
         vk.vkCmdBlitImage(cb, src_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, images[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -588,6 +592,11 @@ void vkp_set_present(int vsync, int mailbox) {
     atomic_store(&want_vsync, vsync);
     atomic_store(&want_mailbox, mailbox);
     atomic_store(&resized, 1);   // the swapchain is rebuilt in the new mode before the next present
+}
+void vkp_set_render_scale(int percent) {
+    if (percent < 1) percent = 1;
+    if (percent > 100) percent = 100;
+    atomic_store(&want_scale, percent);   // read by the next present; the targets stay window-sized
 }
 uint64_t vkp_presented(void) { return atomic_load(&presented); }
 uint64_t vkp_frames(void) {
