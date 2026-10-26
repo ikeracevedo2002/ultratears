@@ -137,6 +137,19 @@ GuestFn dispatch_lookup(uint64_t addr) {
 #define DCACHE 4096
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 
+// Last DRING dispatched targets on this thread, with x30 at the time. Per-thread, so no locks or atomics.
+// For a tail jump x30 is the enclosing function's return address, not the immediate caller.
+#define DRING 32
+static __thread struct { uint64_t pc, lr; } dring[DRING];
+static __thread unsigned dring_n;
+
+static void dring_dump(void) {
+    for (unsigned i = 0; i < DRING && i < dring_n; i++) {
+        unsigned k = (dring_n - 1 - i) % DRING;
+        LOG("[dispatch] -%u: pc %llx lr %llx\n", i, (unsigned long long)dring[k].pc, (unsigned long long)dring[k].lr);
+    }
+}
+
 static GuestFn dispatch_slow(Cpu *c) {
     uint64_t pc = c->pc;
     if (pc >= HLE_BASE && pc < HLE_BASE + HLE_SIZE) {
@@ -154,6 +167,8 @@ static GuestFn dispatch_slow(Cpu *c) {
     if (!f) {
         uint64_t off = 0;
         const char *s = loader_symbol_at(c->x[30], &off);
+        LOG("[dispatch] last %u targets on this thread, newest first:\n", dring_n < DRING ? dring_n : DRING);
+        dring_dump();
         FATAL("no function at %llx (lr=%llx %s+%llx)\n", (unsigned long long)pc, (unsigned long long)c->x[30],
               s ? s : "?", (unsigned long long)off);
     }
@@ -165,6 +180,9 @@ static GuestFn dispatch_slow(Cpu *c) {
 
 // Always tail-calls, so chains of indirect jumps don't grow the host stack.
 void rt_dispatch(Cpu *c) {
+    dring[dring_n % DRING].pc = c->pc;
+    dring[dring_n % DRING].lr = c->x[30];
+    dring_n++;
     unsigned h = (unsigned)(c->pc >> 2) & (DCACHE - 1);
     GuestFn f = dcache[h].addr == c->pc ? dcache[h].fn : dispatch_slow(c);
     __attribute__((musttail)) return f(c);
