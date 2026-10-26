@@ -45,12 +45,14 @@ int totk_vpool_init(pool_t *o) {
         o->host = VirtualAlloc(NULL, o->span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     } else {      // virtual: addresses only
         o->host = VirtualAlloc(NULL, o->span, MEM_RESERVE, PAGE_NOACCESS);
-        vtable *t = calloc(1, sizeof *t);
-        if (!t) die("vpool: table allocation");
-        t->pool = o; t->npages = o->size / TOTK_VPOOL_PAGE;
-        t->pages = calloc(t->npages, sizeof *t->pages);
-        if (!t->pages) die("vpool: page table allocation");
-        pthread_mutex_lock(&g_map_mu); t->next = g_tables; g_tables = t; pthread_mutex_unlock(&g_map_mu);
+        if (o->host) {   // the table only exists for a pool that has addresses (a failed init must not leave it linked)
+            vtable *t = calloc(1, sizeof *t);
+            if (!t) die("vpool: table allocation");
+            t->pool = o; t->npages = o->size / TOTK_VPOOL_PAGE;
+            t->pages = calloc(t->npages, sizeof *t->pages);
+            if (!t->pages) die("vpool: page table allocation");
+            pthread_mutex_lock(&g_map_mu); t->next = g_tables; g_tables = t; pthread_mutex_unlock(&g_map_mu);
+        }
     }
     if (!o->host) { LOG("vpool: VirtualAlloc(%#llx) failed (%lu)", (unsigned long long)o->span, GetLastError()); return 0; }
     o->mem = o->host;
