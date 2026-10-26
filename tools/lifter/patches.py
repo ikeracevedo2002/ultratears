@@ -24,6 +24,18 @@ def drs_off(gen, addr):
             'if (!totk_drs_enabled() || ((c->x[8] >> 0) & 1) == 0) { goto L_800584c3c; } }')
 
 
+def frame_dt(gen, addr):
+    """Real-time frame step (1.4.3). main+0x3e67f0 sets the game's time step: s0 is the frame interval in 60 Hz ticks
+    (2.0 at 30 fps; its caller main+0x3e55e0 makes it from 60 / the frame rate at +0x250), x0 the timing object. Its
+    first use is here (fmul s1, s0, s2 with s2 = 0.5: the step in 30 Hz frames, stored to +0x10). totk_frame_dt
+    (src/host/frame_step.c) puts the real elapsed time in 60 Hz ticks into s0 when TOTK_FPS60 or TOTK_PACE_FPS is set,
+    so game time follows the wall clock at any frame rate; otherwise it only counts the step for the frame-time dump.
+    The same hook site as flabanabba8/totk-60fps-1.4.3 (dynamic/timing.s), written from scratch here."""
+    expect(gen, addr, 0x1e220801, 'frame_dt')   # fmul s1, s0, s2
+    return '{ extern void totk_frame_dt(Cpu *c); totk_frame_dt(c); } fp_op_s(c, FOP_MUL, 1, 0, 2);'
+
+
 PATCHES = {
+    0x8003e6818: frame_dt,
     0x8005843e0: drs_off,
 }
