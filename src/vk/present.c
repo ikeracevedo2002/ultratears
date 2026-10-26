@@ -20,6 +20,7 @@
 #define MAX_IMAGES 8
 
 static SDL_Window *g_window;
+static int linear_only;   // TOTK_LINEAR_BLIT=1: skip EASU/RCAS and blit the game frame as is (a reference for timing)
 static VkSwapchainKHR swapchain;
 static VkFormat format;
 static VkExtent2D extent;
@@ -492,7 +493,7 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
         VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}},
                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
         VkFilter filter = VK_FILTER_LINEAR;
-        int upscale = targets_ready && out->view && dw > 0 && dh > 0;
+        int upscale = !linear_only && targets_ready && out->view && dw > 0 && dh > 0;
         static int path_logged;   // one line per run: which present path the game frames take
         if (!path_logged) {
             path_logged = 1;
@@ -571,6 +572,8 @@ static void *present_thread(void *unused) {
 
 int vkp_init(SDL_Window *window) {
     g_window = window;
+    const char *lb = getenv("TOTK_LINEAR_BLIT");
+    linear_only = lb && lb[0] == '1';
     if (!vk_init(window) || !vkc.surface || !create_present_objects() || !create_overlay()) return 0;
     upscale_ready = create_upscale();   // not fatal: without it the window keeps the linear blit
     if (!create_swapchain()) LOG("window has no area yet; swapchain deferred");
