@@ -488,7 +488,14 @@ static int present_one(uint64_t n, unsigned slot, out_t *out) {
         VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{sx, sy, 0}, {sx + sw, sy + sh, 1}},
                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
         VkFilter filter = VK_FILTER_LINEAR;
-        if (targets_ready && out->view && dw > 0 && dh > 0) {   // the upscale passes; else the linear blit of the crop
+        int upscale = targets_ready && out->view && dw > 0 && dh > 0;
+        static int path_logged;   // one line per run: which present path the game frames take
+        if (!path_logged) {
+            path_logged = 1;
+            LOG("present: %s, crop %dx%d -> %dx%d in a %ux%u window", upscale ? "EASU + RCAS" : "linear blit",
+                sw, sh, dw, dh, extent.width, extent.height);
+        }
+        if (upscale) {   // the upscale passes; else the linear blit of the crop
             upscale_record(cb, slot, out, sx, sy, sw, sh, dw, dh);
             // the sharpened picture sits at the origin of the slot's RCAS output, so it lands 1:1 in the window
             src_img = up_img[slot][1];
