@@ -4,7 +4,8 @@
 //    MacNativeGames) expects, so the key layout is theirs (J/K/I/U = A/B/X/Y, WASD + arrows = sticks, ...);
 //  - game controllers: buttons by position as on a Switch controller (the right face button is A), sticks with Y up;
 //  - rumble: the game's vibration values (hid_feedback.c) drive the controller's low / high frequency motors.
-//  - motion: the controller's gyro and accelerometer feed motion_fusion.c (gyro aiming); F11 / Alt+Enter: fullscreen.
+//  - motion: the controller's gyro and accelerometer feed motion_fusion.c (gyro aiming); F11 / Alt+Enter: fullscreen;
+//  - graphics: F1 opens the settings panel (overlay.c) over the picture; its settings are kept in settings.cfg (settings.c).
 #include <SDL3/SDL.h>
 #define SDL_MAIN_HANDLED   // main() is boot.c's; SDL only gets SDL_SetMainReady
 #include <SDL3/SDL_main.h>
@@ -13,11 +14,14 @@
 #include <stdlib.h>
 
 #include "host.h"
+#include "overlay.h"
+#include "settings.h"
 #include "../vk/present.h"
 
 static SDL_Window *window;
 static SDL_Gamepad *pad;
 static SDL_Mutex *pad_lock;
+static settings_t cfg;   // the graphics settings: the window's size and mode, and the present mode
 
 static int mac_key(SDL_Scancode s) {
     switch (s) {
@@ -92,10 +96,14 @@ int window_init(void) {
         return 0;
     }
     pad_lock = SDL_CreateMutex();
-    window = SDL_CreateWindow("UltraTears", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    settings_load(&cfg);
+    window = SDL_CreateWindow("UltraTears", cfg.width, cfg.height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) { fprintf(stderr, "[totk] window: %s\n", SDL_GetError()); return 0; }
     if (!vkp_init(window))
         runtime_fail("Vulkan initialization failed (Vulkan 1.3 with VK_EXT_shader_object is required)");
+    vkp_set_present(cfg.vsync, cfg.mailbox);
+    vkp_set_render_scale(cfg.render_scale);
+    if (cfg.fullscreen) SDL_SetWindowFullscreen(window, true);
     return 1;
 }
 
@@ -158,17 +166,58 @@ static void close_pad(SDL_JoystickID id) {
 static void toggle_fullscreen(void) {
     bool on = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
     SDL_SetWindowFullscreen(window, !on);   // borderless desktop fullscreen (no display mode change)
+    cfg.fullscreen = !on;
+    settings_save(&cfg);
 }
 
-// Game frame rate and shown frame rate in the title, twice a second.
+// The F1 panel: it draws the current settings over the picture, and a change is applied and saved at once.
+static void overlay_refresh(void) {
+    int w, h;
+    uint32_t *px = overlay_render(&cfg, &w, &h);
+    vkp_overlay(px, w, h);
+}
+static void overlay_show(void) {
+    overlay_open();
+    runtime_input_clear();   // no held game key stays down under the panel
+    overlay_refresh();
+}
+static void overlay_apply(void) {
+    SDL_SetWindowFullscreen(window, cfg.fullscreen);
+    if (!cfg.fullscreen) SDL_SetWindowSize(window, cfg.width, cfg.height);
+    vkp_set_present(cfg.vsync, cfg.mailbox);
+    vkp_set_render_scale(cfg.render_scale);
+    settings_save(&cfg);
+}
+// The panel's keys: arrows move and change a row, Enter picks, Escape or F1 closes.
+static void overlay_input(SDL_Scancode s) {
+    overlay_key_t k;
+    switch (s) {
+    case SDL_SCANCODE_UP: k = OVL_UP; break;
+    case SDL_SCANCODE_DOWN: k = OVL_DOWN; break;
+    case SDL_SCANCODE_LEFT: k = OVL_LEFT; break;
+    case SDL_SCANCODE_RIGHT: k = OVL_RIGHT; break;
+    case SDL_SCANCODE_RETURN: k = OVL_OK; break;
+    case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_F1: k = OVL_BACK; break;
+    default: return;
+    }
+    switch (overlay_key(k, &cfg)) {
+    case OVL_CHANGED: overlay_apply(); overlay_refresh(); break;
+    case OVL_CLOSED: vkp_overlay(NULL, 0, 0); break;
+    case OVL_QUIT: settings_save(&cfg); _Exit(0);
+    default: overlay_refresh(); break;
+    }
+}
+
+// Rendered frame count, game frame rate and shown frame rate in the title, twice a second.
 static void title_update(void) {
     static uint64_t t0, game0, shown0;
     uint64_t now = runtime_now_ns(), game = vkp_frames(), shown = vkp_presented();
     if (!t0) { t0 = now; game0 = game; shown0 = shown; return; }
     if (now - t0 < 500000000) return;
     double s = (now - t0) / 1e9;
-    char title[128];
-    snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", (game - game0) / s, (shown - shown0) / s);
+    char title[160];
+    snprintf(title, sizeof title, "UltraTears  |  frame %llu  |  game %.1f fps  |  shown %.1f fps",
+             (unsigned long long)game, (game - game0) / s, (shown - shown0) / s);
     SDL_SetWindowTitle(window, title);
     t0 = now; game0 = game; shown0 = shown;
 }
@@ -183,14 +232,24 @@ _Noreturn void window_loop(void) {
                     fprintf(stderr, "[totk] window closed\n");
                     _Exit(0);
                 case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
-                    if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+                    bool down = e.type == SDL_EVENT_KEY_DOWN;
+                    int k = mac_key(e.key.scancode);
+                    if (overlay_is_open()) {   // while the panel is open the game gets only the key-ups (no held key sticks)
+                        if (down && !e.key.repeat) overlay_input(e.key.scancode);
+                        else if (!down && k >= 0) runtime_input_key((unsigned)k, 0);
+                        break;
+                    }
+                    if (down && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F1) {
+                        overlay_show();
+                        break;
+                    }
+                    if (down && !e.key.repeat &&
                         (e.key.scancode == SDL_SCANCODE_F11 ||
                          (e.key.scancode == SDL_SCANCODE_RETURN && (e.key.mod & SDL_KMOD_ALT)))) {
                         toggle_fullscreen();
                         break;
                     }
-                    int k = mac_key(e.key.scancode);
-                    if (k >= 0 && !e.key.repeat) runtime_input_key((unsigned)k, e.type == SDL_EVENT_KEY_DOWN);
+                    if (k >= 0 && !e.key.repeat) runtime_input_key((unsigned)k, down);
                     break;
                 }
                 case SDL_EVENT_WINDOW_FOCUS_LOST: runtime_input_clear(); break;
