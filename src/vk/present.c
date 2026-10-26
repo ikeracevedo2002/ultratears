@@ -63,6 +63,14 @@ static VkDescriptorPool upscale_pool;
 static VkDescriptorSet easu_set[FRAMES], rcas_set[FRAMES];
 static int upscale_ready;
 
+// Per frame slot, the EASU output (index 0) and the RCAS output (1): rgba8 storage images the size of the swapchain.
+// create_swapchain builds them; targets_ready = 0 sends the frames to the linear blit.
+static VkImage up_img[FRAMES][2];
+static VkDeviceMemory up_mem[FRAMES][2];
+static VkImageView up_view[FRAMES][2];
+static int targets_ready;
+static int create_upscale_targets(void);
+
 static int make_shader(const uint32_t *code, size_t bytes, VkShaderModule *out) {
     VkShaderModuleCreateInfo si = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code};
     return vk_check(vk.vkCreateShaderModule(vkc.device, &si, NULL, out), "vkCreateShaderModule");
@@ -143,7 +151,21 @@ static int create_upscale(void) {
     return ok;
 }
 
+static void destroy_upscale_targets(void) {
+    for (int i = 0; i < FRAMES; i++)
+        for (int j = 0; j < 2; j++) {
+            vk.vkDestroyImageView(vkc.device, up_view[i][j], NULL);
+            vk.vkDestroyImage(vkc.device, up_img[i][j], NULL);
+            vk.vkFreeMemory(vkc.device, up_mem[i][j], NULL);
+            up_view[i][j] = VK_NULL_HANDLE;
+            up_img[i][j] = VK_NULL_HANDLE;
+            up_mem[i][j] = VK_NULL_HANDLE;
+        }
+    targets_ready = 0;
+}
+
 static void destroy_swapchain(void) {
+    destroy_upscale_targets();
     for (uint32_t i = 0; i < nimages; i++) vk.vkDestroySemaphore(vkc.device, render_done[i], NULL);
     if (swapchain) vk.vkDestroySwapchainKHR(vkc.device, swapchain, NULL);
     swapchain = VK_NULL_HANDLE;
@@ -201,6 +223,7 @@ static int create_swapchain(void) {
     vk.vkGetSwapchainImagesKHR(vkc.device, swapchain, &nimages, images);
     VkSemaphoreCreateInfo si = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     for (uint32_t i = 0; i < nimages; i++) vk.vkCreateSemaphore(vkc.device, &si, NULL, &render_done[i]);
+    if (upscale_ready) targets_ready = create_upscale_targets();
     LOG("swapchain %ux%u, %u images, %s", extent.width, extent.height, nimages,
         mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo");
     return 1;
@@ -237,6 +260,32 @@ static uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < vkc.memory.memoryTypeCount; i++)
         if ((bits & (1u << i)) && (vkc.memory.memoryTypes[i].propertyFlags & want) == want) return i;
     return UINT32_MAX;
+}
+
+// The EASU and RCAS outputs for every frame slot, at the swapchain size. A failure frees what was made.
+static int create_upscale_targets(void) {
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = {extent.width, extent.height, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    for (int i = 0; i < FRAMES; i++)
+        for (int j = 0; j < 2; j++) {
+            VkMemoryRequirements req;
+            if (!vk_check(vk.vkCreateImage(vkc.device, &ci, NULL, &up_img[i][j]), "upscale image")) goto fail;
+            vk.vkGetImageMemoryRequirements(vkc.device, up_img[i][j], &req);
+            VkMemoryAllocateInfo ai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+                                       .memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+            if (!vk_check(vk.vkAllocateMemory(vkc.device, &ai, NULL, &up_mem[i][j]), "upscale memory")) goto fail;
+            vk.vkBindImageMemory(vkc.device, up_img[i][j], up_mem[i][j], 0);
+            VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = up_img[i][j], .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                        .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            if (!vk_check(vk.vkCreateImageView(vkc.device, &vi, NULL, &up_view[i][j]), "upscale view")) goto fail;
+        }
+    return 1;
+fail:
+    LOG("upscale targets unavailable; the window uses the linear blit");
+    destroy_upscale_targets();
+    return 0;
 }
 
 int vkp_active(void) { return swapchain != VK_NULL_HANDLE || g_window != NULL; }
