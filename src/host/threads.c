@@ -158,7 +158,10 @@ static void gate_size_init(void) {
 // The core number the guest sees is a Switch core, 0 to 2. Gates 3 and up report as 0 to 2 again, so the game's per-core
 // data keeps the layout it was built for. Two threads may then report the same number: that is the race to test.
 static uint32_t guest_core(int gate) { return (uint32_t)(gate % 3); }
-static int thread_log_on(void) { static int on = -1; if (on < 0) on = getenv("TOTK_THREAD_LOG") != NULL; return on; }   // TOTK_THREAD_LOG: gate waits and core masks
+static int thread_log_on(void) { static int on = -1; if (on < 0) on = getenv("TOTK_THREAD_LOG") != NULL; return on; }   // TOTK_THREAD_LOG: core masks
+// Gate waits are counted, not logged: a LOG under G stalls every thread that needs the gate (see the periodic [nvn] line).
+static _Atomic uint64_t g_gate_waits;
+void dm_gate_wait_stats(uint64_t *n) { *n = g_gate_waits; }
 static void core_grant(int c) {   // holding G: give free core c to the best waiter
     thr_t *b = NULL, **bp = NULL;
     for (thr_t **p = &g_core_wait; *p; p = &(*p)->cnext)
@@ -176,7 +179,7 @@ static void core_take(thr_t *t) {   // holding G; waits until a core in t's mask
     int c = t->core >= 0 && t->core < g_ncore && core_allowed(t, t->core) && !g_core_owner[t->core] ? t->core : -1;
     for (int i = 0; c < 0 && i < g_ncore; i++) if (core_allowed(t, i) && !g_core_owner[i]) c = i;
     if (c >= 0) { t->cur_core = c; t->core_since = now_ns(); g_core_owner[c] = t; return; }
-    if (thread_log_on()) LOG("gate wait h=%#x prio=%d mask=%#llx", t->handle, t->prio, (unsigned long long)t->mask);
+    g_gate_waits++;
     t->cseq = ++g_wseq; t->cnext = g_core_wait; g_core_wait = t;
     for (int i = 0; i < g_ncore; i++) if (core_allowed(t, i) && g_core_owner[i] && g_core_owner[i]->prio > t->prio) g_core_owner[i]->preempt = 1;
     while (t->cur_core < 0) pthread_cond_wait(&t->cv, &G);
@@ -416,11 +419,15 @@ int svc_thread(int num, uint64_t *regs) {
     case 0x0E: { pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[2], O_THREAD);
                  regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)(uint32_t)t->core : 0; regs[2] = t ? t->mask & 7 : 0;pthread_mutex_unlock(&G); return 1; }
     case 0x0F: {  // SetThreadCoreMask(w0, w1 理想核, x2 掩码)：-1 = 用进程缺省、-2/-3 = 不改理想核；宿主只记账 | SetThreadCoreMask(w0, w1 ideal core, x2 mask): -1 = use the process default, -2/-3 = leave the ideal core unchanged; the host only keeps the bookkeeping
-        pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
+        uint32_t handle = (uint32_t)regs[0]; uint64_t in_mask = regs[2];
+        pthread_mutex_lock(&G);thr_t *t = h_get(handle, O_THREAD); int ok = t != NULL; int core = -1; uint64_t mask = 0;
         if (t) { int c = (int)regs[1]; if (c >= 0) t->core = c; else if (c == -1) t->core = 0; if (regs[2]) t->mask = host_mask(regs[2]);
-                 if (thread_log_on()) LOG("SetThreadCoreMask h=%#x core=%d mask=%#llx -> %#llx", t->handle, t->core, (unsigned long long)regs[2], (unsigned long long)t->mask);
+                 core = t->core; mask = t->mask;
                  if (t == cur() && t->cur_core >= 0 && !core_allowed(t, t->cur_core)) { core_put(t); core_take(t); } }   // migrate off a core no longer allowed
-        regs[0] = t ? 0 : R_BAD_HANDLE;pthread_mutex_unlock(&G); return 1;
+        regs[0] = ok ? 0 : R_BAD_HANDLE;pthread_mutex_unlock(&G);
+        // Logged after G is released, like the gate-wait counter: a LOG under G stalls every thread that needs the gate.
+        if (ok && thread_log_on()) LOG("SetThreadCoreMask h=%#x core=%d mask=%#llx -> %#llx", handle, core, (unsigned long long)in_mask, (unsigned long long)mask);
+        return 1;
     }
     case 0x10: { thr_t *t = cur(); regs[0] = t->cur_core >= 0 ? guest_core(t->cur_core) : (uint32_t)t->core; return 1; }   // GetCurrentProcessorNumber
     case 0x25: { pthread_mutex_lock(&G);thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? t->id : 0;pthread_mutex_unlock(&G); return 1; }

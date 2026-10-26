@@ -2263,6 +2263,7 @@ static unsigned present_ticks(const win_t *o);
 extern void runtime_frame_step_update(uint64_t now_ns) __attribute__((weak_import));
 extern void movie_host_tick(void) __attribute__((weak_import));   /* TOTK runtime/movie_host.c: pre-rendered cutscenes at their own frame rate */
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // 宿主 hle_thread.c 提供真值；图形单测里为 0 | The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
+__attribute__((weak)) void dm_gate_wait_stats(uint64_t *n) { *n = 0; }   // 宿主 threads.c 提供真值 | The host's threads.c provides the ground truth
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
 extern uint32_t mtl_present_qos(void);
 uint64_t g_frame_pub;
@@ -2416,6 +2417,9 @@ static void tsummary(uint64_t frame) {
         { static uint64_t pun, puns; uint64_t un = 0, uns = 0; void mtl_upload_wait_stats(uint64_t *, uint64_t *); mtl_upload_wait_stats(&un, &uns);
           if (pf && frame > pf) LOG("[nvn] upload-slot waits through frame %llu: %.2f/frame / %.3f ms", frame, (double)(un - pun) / (double)(frame - pf), (double)(uns - puns) / 1e6 / (double)(frame - pf));
           pun = un; puns = uns; }
+        { static uint64_t pgw; uint64_t gw = 0; dm_gate_wait_stats(&gw);
+          if (pf && frame > pf) LOG("[nvn] gate waits through frame %llu: %.2f/frame", frame, (double)(gw - pgw) / (double)(frame - pf));
+          pgw = gw; }
         { static uint64_t pcc; uint64_t mtl_chunk_commits(void), cc = mtl_chunk_commits();
           if (pf && frame > pf) LOG("[nvn] split submissions through frame %llu: %.2f extra segments/frame", frame, (double)(cc - pcc) / (double)(frame - pf));
           pcc = cc; }
