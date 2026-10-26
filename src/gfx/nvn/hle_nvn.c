@@ -2464,6 +2464,7 @@ static struct { uint64_t f; int n; const char *k[64]; double v[64]; } g_sr[SRN];
 static int g_slow = -1;
 static int slow_on(void) { if (g_slow < 0) g_slow = getenv("DM_SLOWFRAME") != NULL; return g_slow; }
 static int frame_rec(void) { return g_tsv || slow_on(); }
+static int tsum_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_TSUMMARY"); on = !(e && !strcmp(e, "0")); } return on; }   // DM_NVN_TSUMMARY=0: no periodic tsummary log line (timing runs)
 static void trow(uint64_t f, const char *name, double v) {
     if (g_tsv) fprintf(g_tsv, "%llu\t%s\t%.3f\n", f, name, v);
     if (slow_on()) { __typeof__(g_sr[0]) *r = &g_sr[f % SRN]; if (r->f != f) { r->f = f; r->n = 0; } if (r->n < 64) { r->k[r->n] = name; r->v[r->n++] = v; } }
@@ -2790,7 +2791,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         uint64_t g0, g1; if (frame_rec() && mtl_gpu_span(f - 8, &g0, &g1)) { trow(f - 8, "@gpu_beg_ms", (g0 - g_t0_ns) / 1e6); trow(f - 8, "@gpu_end_ms", (g1 - g_t0_ns) / 1e6); } }
     prev_in = t0; prev_pass = ps; prev_draw = dr;
     dump_frame();
-    if (g_frame % TWIN == 0) tsummary(g_frame);
+    if (g_frame % TWIN == 0 && tsum_on()) tsummary(g_frame);
     if (call_stats_on() && g_frame % 300 == 0) {
         static uint64_t pd; uint64_t ps2, dr2; mtl_stats(&ps2, &dr2); uint64_t all = dr2 - pd; pd = dr2;
         LOG("[nvn] call lists over the last 300 frames: %.0f draws/frame, %.0f from called lists (%.0f%%), %.0f in lists identical to the previous frame (%.0f%%); %.0f calls/frame / %.0f KB, identical %.0f / %.0f KB",
