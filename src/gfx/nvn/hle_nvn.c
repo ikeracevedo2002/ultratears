@@ -2215,7 +2215,12 @@ NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
     Cpu *c = guest_cpu();
     if (c && c->x[30] == FRAME_CONTROLLER_LR) {
         static int max_iv = -1;
-        if (max_iv < 0) { const char *e = getenv("TOTK_MAX_INTERVAL"); max_iv = e && *e ? atoi(e) : 2; LOG("[nvn] present interval limit %d (TOTK_MAX_INTERVAL; 0 = the game's own limit)", max_iv); }
+        if (max_iv < 0) {
+            /* TOTK_FPS60 implies a limit of 1 unless TOTK_MAX_INTERVAL says otherwise; the limit of 2 is what keeps 30 fps. */
+            const char *e = getenv("TOTK_MAX_INTERVAL"), *f = getenv("TOTK_FPS60");
+            max_iv = e && *e ? atoi(e) : (f && atoi(f) > 0 ? 1 : 2);
+            LOG("[nvn] present interval limit %d (TOTK_MAX_INTERVAL; 0 = the game's own limit)", max_iv);
+        }
         if (!g_frame_ctl) { g_frame_ctl = c->x[20]; if (!g_game_sys) { g_game_sys = c->x[19]; LOG("[nvn] game system object %#llx, interval controller %#llx", (unsigned long long)g_game_sys, (unsigned long long)g_frame_ctl); } }
         uint32_t *ctl = (uint32_t *)(uintptr_t)c->x[20];
         /* TOTK_FPS60=1 (opt-in): lower the controller's minimum from 2 (30 fps) to 1 (60 fps). This approximates
