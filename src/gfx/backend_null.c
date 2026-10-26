@@ -2,6 +2,11 @@
 // once by doing nothing, fences complete immediately, presents only count. Plus the stand-ins for MacNativeGames'
 // diagnostics (life log, timeline), MetalFX, virtual pools (not ported yet: stop with their name) and host glue.
 // The Vulkan replayer replaces the mtl_* part (milestone 3.2/3.3).
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -21,7 +26,17 @@ void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }
 void mtl_shot_at_present(const tex_t *t) { (void)t; }
 int mtl_has_window(void) { return 0; }
-int mtl_display_hz(void) { return 60; }
+// The present cadence follows the primary monitor's refresh rate. Virtual adapters (Parsec, SudoMaker) report 0 or 1 Hz:
+// those fall back to 60.
+int mtl_display_hz(void) {
+#ifdef _WIN32
+    DEVMODEW dm;
+    memset(&dm, 0, sizeof dm);
+    dm.dmSize = sizeof dm;
+    if (EnumDisplaySettingsW(NULL, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) return (int)dm.dmDisplayFrequency;
+#endif
+    return 60;
+}
 double mtl_presented_time(uint64_t n) { (void)n; return 0; }
 void mtl_set_frame(uint64_t f) { (void)f; }
 void mtl_note_world(void) {}
