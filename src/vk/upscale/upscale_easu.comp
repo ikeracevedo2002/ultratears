@@ -47,8 +47,7 @@ void main() {
         float wy = cr(f.y - float(j - 1));
         for (int i = 0; i < 4; ++i) {
             float w = cr(f.x - float(i - 1)) * wy;
-            // BGRA storage: .bgr puts the colour back in RGB order.
-            vec3 c = texelFetch(src, clamp(base + ivec2(i - 1, j - 1), lo, hi), 0).bgr;
+            vec3 c = texelFetch(src, clamp(base + ivec2(i - 1, j - 1), lo, hi), 0).rgb;
             sum += c * w;
             wsum += w;
             // Tap indices 1..2 on both axes are the 2x2 texels around the sample point.
