@@ -5,6 +5,7 @@
 // Vsync on: FIFO. Vsync off (the default): mailbox when the surface offers it (the newest frame wins, no tearing).
 #include "present.h"
 #include "vk.h"
+#include "upscale/upscale_spv.h"
 
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -51,6 +52,95 @@ static int create_present_objects(void) {
         if (!vk_check(vk.vkCreateSemaphore(vkc.device, &si, NULL, &image_ready[i]), "vkCreateSemaphore") ||
             !vk_check(vk.vkCreateFence(vkc.device, &fi, NULL, &in_flight[i]), "vkCreateFence")) return 0;
     return 1;
+}
+
+// Upscale compute pipelines: EASU (the window's upscaler) and RCAS (its sharpening pass). Built once; each frame's
+// descriptor sets are written in present_one. A failure leaves them unbuilt and the window gets the linear blit.
+static VkDescriptorSetLayout easu_dsl, rcas_dsl;
+static VkPipelineLayout easu_pl, rcas_pl;
+static VkPipeline easu_pipe, rcas_pipe;
+static VkDescriptorPool upscale_pool;
+static VkDescriptorSet easu_set[FRAMES], rcas_set[FRAMES];
+static int upscale_ready;
+
+static int make_shader(const uint32_t *code, size_t bytes, VkShaderModule *out) {
+    VkShaderModuleCreateInfo si = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code};
+    return vk_check(vk.vkCreateShaderModule(vkc.device, &si, NULL, out), "vkCreateShaderModule");
+}
+
+// Both passes take two bindings on set 0; push_bytes is the size of the pass's push constants.
+static int make_layout(VkDescriptorType a, VkDescriptorType b, uint32_t push_bytes, VkDescriptorSetLayout *dsl,
+                       VkPipelineLayout *pl) {
+    VkDescriptorSetLayoutBinding bind[2] = {
+        {0, a, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL},
+        {1, b, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo dl = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = bind};
+    if (!vk_check(vk.vkCreateDescriptorSetLayout(vkc.device, &dl, NULL, dsl), "vkCreateDescriptorSetLayout")) return 0;
+    VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, push_bytes};
+    VkPipelineLayoutCreateInfo pli = {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = dsl,
+                                      .pushConstantRangeCount = 1, .pPushConstantRanges = &pr};
+    return vk_check(vk.vkCreatePipelineLayout(vkc.device, &pli, NULL, pl), "vkCreatePipelineLayout");
+}
+
+static int make_compute(VkShaderModule mod, VkPipelineLayout layout, VkPipeline *out) {
+    VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL},
+        .layout = layout};
+    return vk_check(vk.vkCreateComputePipelines(vkc.device, VK_NULL_HANDLE, 1, &ci, NULL, out), "vkCreateComputePipelines");
+}
+
+static void destroy_upscale(void) {
+    if (upscale_pool) vk.vkDestroyDescriptorPool(vkc.device, upscale_pool, NULL);   // frees the sets too
+    if (easu_pipe) vk.vkDestroyPipeline(vkc.device, easu_pipe, NULL);
+    if (rcas_pipe) vk.vkDestroyPipeline(vkc.device, rcas_pipe, NULL);
+    if (easu_pl) vk.vkDestroyPipelineLayout(vkc.device, easu_pl, NULL);
+    if (rcas_pl) vk.vkDestroyPipelineLayout(vkc.device, rcas_pl, NULL);
+    if (easu_dsl) vk.vkDestroyDescriptorSetLayout(vkc.device, easu_dsl, NULL);
+    if (rcas_dsl) vk.vkDestroyDescriptorSetLayout(vkc.device, rcas_dsl, NULL);
+    upscale_pool = VK_NULL_HANDLE;
+    easu_pipe = rcas_pipe = VK_NULL_HANDLE;
+    easu_pl = rcas_pl = VK_NULL_HANDLE;
+    easu_dsl = rcas_dsl = VK_NULL_HANDLE;
+}
+
+// 1 = the upscale pipelines and their descriptor sets exist; 0 = logged, and the caller falls back to linear.
+static int create_upscale(void) {
+    VkShaderModule easu_mod = VK_NULL_HANDLE, rcas_mod = VK_NULL_HANDLE;
+    int ok = make_shader(upscale_easu_spv, upscale_easu_spv_size, &easu_mod) &&
+             make_shader(upscale_rcas_spv, upscale_rcas_spv_size, &rcas_mod) &&
+             make_layout(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 28, &easu_dsl, &easu_pl) &&
+             make_layout(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 12, &rcas_dsl, &rcas_pl) &&
+             make_compute(easu_mod, easu_pl, &easu_pipe) &&
+             make_compute(rcas_mod, rcas_pl, &rcas_pipe);
+    if (easu_mod) vk.vkDestroyShaderModule(vkc.device, easu_mod, NULL);
+    if (rcas_mod) vk.vkDestroyShaderModule(vkc.device, rcas_mod, NULL);
+    if (ok) {
+        // One EASU set (sampled + storage) and one RCAS set (two storage) per frame in flight.
+        VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, FRAMES}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3 * FRAMES}};
+        VkDescriptorPoolCreateInfo pi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2 * FRAMES,
+                                         .poolSizeCount = 2, .pPoolSizes = sizes};
+        VkDescriptorSetLayout easu_l[FRAMES], rcas_l[FRAMES];
+        for (int i = 0; i < FRAMES; i++) {
+            easu_l[i] = easu_dsl;
+            rcas_l[i] = rcas_dsl;
+        }
+        VkDescriptorSetAllocateInfo ai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = FRAMES};
+        ok = vk_check(vk.vkCreateDescriptorPool(vkc.device, &pi, NULL, &upscale_pool), "vkCreateDescriptorPool");
+        if (ok) {
+            ai.descriptorPool = upscale_pool;
+            ai.pSetLayouts = easu_l;
+            ok = vk_check(vk.vkAllocateDescriptorSets(vkc.device, &ai, easu_set), "vkAllocateDescriptorSets");
+        }
+        if (ok) {
+            ai.pSetLayouts = rcas_l;
+            ok = vk_check(vk.vkAllocateDescriptorSets(vkc.device, &ai, rcas_set), "vkAllocateDescriptorSets");
+        }
+    }
+    if (!ok) {
+        LOG("upscale pipelines unavailable; the window uses the linear blit");
+        destroy_upscale();
+    }
+    return ok;
 }
 
 static void destroy_swapchain(void) {
@@ -355,6 +445,7 @@ static void *present_thread(void *unused) {
 int vkp_init(SDL_Window *window) {
     g_window = window;
     if (!vk_init(window) || !vkc.surface || !create_present_objects() || !create_overlay()) return 0;
+    upscale_ready = create_upscale();   // not fatal: without it the window keeps the linear blit
     if (!create_swapchain()) LOG("window has no area yet; swapchain deferred");
     pthread_t t;
     if (pthread_create(&t, NULL, present_thread, NULL)) { LOG("present thread"); return 0; }
