@@ -225,7 +225,8 @@ static VkClearColorValue frame_colour(uint64_t n) {
 #define OUTS 3
 typedef struct {
     VkImage img; VkDeviceMemory mem; uint32_t w, h;
-    int state;                   // 0 free, 1 written (pending), 2 being shown
+    VkImageView view;            // sampled by the upscale pass; NULL = that frame uses the linear blit
+    int state;                  // 0 free, 1 written (pending), 2 being shown
     uint64_t seq;                // when it was written (newest pending wins)
     VkSemaphore timeline; uint64_t value; int crop[4];
 } out_t;
@@ -251,14 +252,17 @@ int vkp_out_acquire(uint32_t w, uint32_t h, VkImage *image) {
     if (pick < 0) return -1;
     out_t *o = &g_out[pick];
     if (o->img && (o->w != w || o->h != h)) {   // free: no present work uses it
+        vk.vkDestroyImageView(vkc.device, o->view, NULL);
         vk.vkDestroyImage(vkc.device, o->img, NULL);
         vk.vkFreeMemory(vkc.device, o->mem, NULL);
         o->img = VK_NULL_HANDLE;
+        o->view = VK_NULL_HANDLE;
     }
     if (!o->img) {
         VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_B8G8R8A8_UNORM,
             .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
         VkMemoryRequirements req;
         if (!vk_check(vk.vkCreateImage(vkc.device, &ci, NULL, &o->img), "output image")) goto fail;
         vk.vkGetImageMemoryRequirements(vkc.device, o->img, &req);
@@ -270,6 +274,9 @@ int vkp_out_acquire(uint32_t w, uint32_t h, VkImage *image) {
             goto fail;
         }
         vk.vkBindImageMemory(vkc.device, o->img, o->mem, 0);
+        VkImageViewCreateInfo vi = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = VK_FORMAT_B8G8R8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (!vk_check(vk.vkCreateImageView(vkc.device, &vi, NULL, &o->view), "output view")) o->view = VK_NULL_HANDLE;
         o->w = w; o->h = h;
     }
     *image = o->img;
