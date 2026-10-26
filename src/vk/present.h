@@ -21,3 +21,11 @@ int vkp_active(void);               // a window with a swapchain is there (else 
 // timeline value after which the copy is done. -1 = none free (the frame is dropped).
 int vkp_out_acquire(uint32_t width, uint32_t height, VkImage *image);
 void vkp_out_ready(int slot, VkSemaphore timeline, uint64_t value, const int crop[4]);
+
+// Settings overlay (present thread): BGRA panel drawn centred over the next presented frame. NULL hides it. The pixels
+// are copied at call time, so the caller may reuse its buffer straight away.
+#define VKP_OVERLAY_MAX_W 640
+#define VKP_OVERLAY_MAX_H 480
+void vkp_overlay(const uint32_t *bgra, int w, int h);
+// Present mode for the next frame: vsync on = FIFO, vsync off with mailbox = MAILBOX, else IMMEDIATE when the surface has it.
+void vkp_set_present(int vsync, int mailbox);
