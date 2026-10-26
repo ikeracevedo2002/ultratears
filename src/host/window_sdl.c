@@ -160,15 +160,16 @@ static void toggle_fullscreen(void) {
     SDL_SetWindowFullscreen(window, !on);   // borderless desktop fullscreen (no display mode change)
 }
 
-// Game frame rate and shown frame rate in the title, twice a second.
+// Rendered frame count, game frame rate and shown frame rate in the title, twice a second.
 static void title_update(void) {
     static uint64_t t0, game0, shown0;
     uint64_t now = runtime_now_ns(), game = vkp_frames(), shown = vkp_presented();
     if (!t0) { t0 = now; game0 = game; shown0 = shown; return; }
     if (now - t0 < 500000000) return;
     double s = (now - t0) / 1e9;
-    char title[128];
-    snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", (game - game0) / s, (shown - shown0) / s);
+    char title[160];
+    snprintf(title, sizeof title, "UltraTears  |  frame %llu  |  game %.1f fps  |  shown %.1f fps",
+             (unsigned long long)game, (game - game0) / s, (shown - shown0) / s);
     SDL_SetWindowTitle(window, title);
     t0 = now; game0 = game; shown0 = shown;
 }
