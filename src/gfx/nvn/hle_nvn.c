@@ -2218,6 +2218,13 @@ NVN(nvnWindowSetPresentInterval, void, NVNwindow *w, int v) {
         if (max_iv < 0) { const char *e = getenv("TOTK_MAX_INTERVAL"); max_iv = e && *e ? atoi(e) : 2; LOG("[nvn] present interval limit %d (TOTK_MAX_INTERVAL; 0 = the game's own limit)", max_iv); }
         if (!g_frame_ctl) { g_frame_ctl = c->x[20]; if (!g_game_sys) { g_game_sys = c->x[19]; LOG("[nvn] game system object %#llx, interval controller %#llx", (unsigned long long)g_game_sys, (unsigned long long)g_frame_ctl); } }
         uint32_t *ctl = (uint32_t *)(uintptr_t)c->x[20];
+        /* TOTK_FPS60=1 (opt-in): lower the controller's minimum from 2 (30 fps) to 1 (60 fps). This approximates
+           MacNativeGames' fps60 patch, which also rewrites the minimum reads and two selects and nops an upper-limit
+           read; the minimum is read before this call on each pass, so the change applies from the next pass. Unverified,
+           and 60 fps without the real-time frame step runs game time about 2x fast, so it is not on by default. */
+        static int fps60 = -1;
+        if (fps60 < 0) { const char *e = getenv("TOTK_FPS60"); fps60 = e && atoi(e) > 0; LOG("[nvn] 60 fps controller minimum %s (TOTK_FPS60=1)", fps60 ? "on" : "off"); }
+        if (fps60 && ctl[0] > 1) ctl[0] = 1;
         if (max_iv > 0 && ctl[1] > (uint32_t)max_iv) ctl[1] = (uint32_t)max_iv;
         if (max_iv > 0 && v > max_iv) { v = max_iv; c->x[21] = (uint32_t)v; ctl[0x40 / 4] = (uint32_t)v; }
     }
@@ -2544,10 +2551,11 @@ static void sleep_until_ns(uint64_t dl) {   // 单调时钟上的绝对时刻 | 
 // DM_PRESENT_HZ=0 (uncapped frame rate) serves only as an explicit performance profiling switch: some of the game's UI logic counts frames (with the same save, uncapped gives
 // 4181 SaveIndicatorPanel entries and capped at 60 fps gives 0, which matches the ground truth), so uncapped is a semantically wrong way to run and must not be used as a criterion / cross-check / default. Unit tests set it directly with nvn_present_config
 static int g_hz = -1, g_display_mode;
-/* TOTK_UNCAPPED (Mac and iPhone, default on; =0 off): like vsync off in other games. The game no longer waits for the display: it is
+/* TOTK_UNCAPPED=1 (off by default): like vsync off in other games. The game no longer waits for the display: it is
    paced by our own clock at UNCAPPED_HZ, and the display link shows the newest finished frame at every refresh (older ones
-   are merged away, as when the game runs ahead). The ceiling is 120 because the real-time frame step (game_patches.c)
-   clamps a frame to at least 1/120 s: above that the game would run fast. On a display of 120 Hz or more it changes nothing. */
+   are merged away, as when the game runs ahead). The ceiling is 120 because the real-time frame step (MacNativeGames'
+   game_patches_v143.c, not ported yet) clamps a frame to at least 1/120 s: above that the game would run fast. Until that
+   step is ported, uncapped stays off (present_cfg). On a display of 120 Hz or more it changes nothing. */
 #define UNCAPPED_HZ 120
 /* TOTK_UNCAPPED_HZ: the uncapped clock's ceiling, 30..120 (default 120), or "display" for the display's refresh rate: the
    iPhone app's default since 2026-10-17 (user: at most 60 on the iPhone 14's 60 Hz screen, where frames above it are never
@@ -2572,7 +2580,7 @@ static void present_cfg(const win_t *o) {
       // ported yet: without them the engine steps game time per frame as if at its chosen
       // interval, and ~60 presents a second ran the game fast. Off unless TOTK_UNCAPPED=1.
       g_uncapped = !e && realtime && u && !strcmp(u, "1") && !(f60 && !strcmp(f60, "0")) && g_hz < UNCAPPED_HZ; }
-    if (g_uncapped) { g_hz = uncapped_cap(scr); LOG("[nvn] uncapped (TOTK_UNCAPPED, on by default; =0 disables): independent clock capped at %d fps (TOTK_UNCAPPED_HZ); %d Hz display shows the latest frame each refresh%s", g_hz, scr,
+    if (g_uncapped) { g_hz = uncapped_cap(scr); LOG("[nvn] uncapped (TOTK_UNCAPPED=1): independent clock capped at %d fps (TOTK_UNCAPPED_HZ); %d Hz display shows the latest frame each refresh%s", g_hz, scr,
                                        mfx_enabled() ? " (paused while interpolation is on: one game frame per two refreshes)" : " (paused when interpolation is enabled with key 2)"); }
     if (!g_hz) LOG("[nvn] [warning] DM_PRESENT_HZ=0: uncapped timing differs from real hardware and may affect UI logic (profiling only)");
     // 剪口（有意偏离原版行为）：DM_PRESENT_INTERVAL=display 时不按游戏设的出图间隔，每个节拍出一帧，
