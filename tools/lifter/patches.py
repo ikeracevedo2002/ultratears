@@ -35,7 +35,17 @@ def frame_dt(gen, addr):
     return '{ extern void totk_frame_dt(Cpu *c); totk_frame_dt(c); } fp_op_s(c, FOP_MUL, 1, 0, 2);'
 
 
+def scene_scale(gen, addr):
+    """Scene resolution scale (1.4.3). On the controller's disabled path (main+0x584c3c, see drs_off) the scale it
+    returns is this constant 1.0 (mov w23, #1.0). totk_scene_scale_bits (src/gfx/nvn/hle_nvn.c) returns render_scale
+    (settings.cfg / F1) or TOTK_SCENE_SCALE as float bits instead (default 1.0): the renderer (main+0x581a0c) turns it
+    into the scene size at +0xccc."""
+    expect(gen, addr, 0x52a7f017, 'scene_scale')   # mov w23, #0x3f800000
+    return '{ extern uint32_t totk_scene_scale_bits(void); c->x[23] = (uint32_t)totk_scene_scale_bits(); }'
+
+
 PATCHES = {
     0x8003e6818: frame_dt,
+    0x800584c44: scene_scale,
     0x8005843e0: drs_off,
 }

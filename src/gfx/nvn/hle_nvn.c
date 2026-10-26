@@ -2208,6 +2208,36 @@ int totk_drs_enabled(void) {
     return on;
 }
 
+/* The scale the disabled resolution controller returns (tools/lifter/patches.py, scene_scale), read every frame: the
+   game's scene is 1600x896 times it. render_scale in settings.cfg / F1 sets it (100 or 120 percent: 1920x1080), and
+   TOTK_SCENE_SCALE=<factor> overrides both. Above about 1.2 the game crashes at boot (its memory for the scene targets
+   runs out, 2026-10-26), so the factor is held to 0.5..1.2. A change takes effect at the next frame, as dynamic
+   resolution does. */
+#define SCENE_SCALE_MAX 1.2f
+static _Atomic uint32_t g_scene_scale_bits = 0x3f800000u;   // 1.0f
+static int scene_scale_env(float *s) {
+    static int have = -1; static float v;
+    if (have < 0) { const char *e = getenv("TOTK_SCENE_SCALE"); have = e && atof(e) > 0; v = have ? (float)atof(e) : 1.0f; }
+    *s = v;
+    return have;
+}
+static void scene_scale_store(float s, const char *why) {
+    if (s < 0.5f) s = 0.5f;
+    if (s > SCENE_SCALE_MAX) s = SCENE_SCALE_MAX;
+    uint32_t b; memcpy(&b, &s, sizeof b);
+    if (atomic_exchange(&g_scene_scale_bits, b) != b) LOG("[nvn] scene scale %.2f: %dx%d (%s)", s, (int)(1600 * s), (int)(896 * s), why);
+}
+void nvn_set_scene_scale(int percent) {
+    float s;
+    if (scene_scale_env(&s)) scene_scale_store(s, "TOTK_SCENE_SCALE");
+    else scene_scale_store(percent / 100.0f, "render_scale");
+}
+uint32_t totk_scene_scale_bits(void) {
+    static int once;
+    if (!once) { once = 1; float s; if (scene_scale_env(&s)) scene_scale_store(s, "TOTK_SCENE_SCALE"); }
+    return atomic_load(&g_scene_scale_bits);
+}
+
 #define FRAME_CONTROLLER_LR 0x8002db2ecull
 static uint64_t g_frame_ctl;   // the controller's state (guest address)
 uint64_t nvn_frame_ctl(void) { return g_frame_ctl; }

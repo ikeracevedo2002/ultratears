@@ -14,7 +14,7 @@ enum { ROW_RES, ROW_WINDOW, ROW_VSYNC, ROW_MAILBOX, ROW_SCALE, ROW_QUIT, ROWS };
 static const int presets[][2] = {{1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
 #define PRESETS ((int)(sizeof presets / sizeof *presets))
 
-static const int scales[] = {100, 75, 50};
+static const int scales[] = {100, 120};   // the scene at 1600x896 (the game's own) or 1920x1080
 #define SCALES ((int)(sizeof scales / sizeof *scales))
 
 static int shown, row;
@@ -150,7 +150,7 @@ uint32_t *overlay_render(const settings_t *s, int *w, int *h) {
         case ROW_WINDOW: snprintf(label, sizeof label, "WINDOW MODE  %s", s->fullscreen ? "FULLSCREEN" : "WINDOWED"); break;
         case ROW_VSYNC: snprintf(label, sizeof label, "VSYNC  %s", s->vsync ? "ON" : "OFF"); break;
         case ROW_MAILBOX: snprintf(label, sizeof label, "MAILBOX  %s", s->mailbox ? "ON" : "OFF"); break;
-        case ROW_SCALE: snprintf(label, sizeof label, "RENDER SCALE  %d PERCENT", s->render_scale); break;
+        case ROW_SCALE: snprintf(label, sizeof label, "RENDER SCALE  %d PERCENT  %s", s->render_scale, s->render_scale == 120 ? "1920X1080" : "1600X896"); break;
         default: snprintf(label, sizeof label, "QUIT TO DESKTOP"); break;
         }
         text(32, y + 8, label, c);

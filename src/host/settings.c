@@ -32,7 +32,7 @@ void settings_load(settings_t *s) {
         else if (!strcmp(line, "fullscreen")) s->fullscreen = v != 0;
         else if (!strcmp(line, "vsync")) s->vsync = v != 0;
         else if (!strcmp(line, "mailbox")) s->mailbox = v != 0;
-        else if (!strcmp(line, "render_scale") && (v == 50 || v == 75 || v == 100)) s->render_scale = (int)v;
+        else if (!strcmp(line, "render_scale") && (v == 100 || v == 120)) s->render_scale = (int)v;
     }
     fclose(f);
 }
