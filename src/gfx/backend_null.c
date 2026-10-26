@@ -26,10 +26,12 @@ void mtl_xv_window_tex(uint64_t serial) { (void)serial; }
 void mtl_present_wait(uint64_t ticket) { (void)ticket; }
 void mtl_shot_at_present(const tex_t *t) { (void)t; }
 int mtl_has_window(void) { return 0; }
-// The present cadence follows the primary monitor's refresh rate. Virtual adapters (Parsec, SudoMaker) report 0 or 1 Hz:
-// those fall back to 60.
+// With TOTK_FPS60 or TOTK_PACE_FPS set, the present cadence follows the primary monitor's refresh rate. Virtual adapters
+// (Parsec, SudoMaker) report 0 or 1 Hz: those fall back to 60. Otherwise the cadence stays at 60 as before.
 int mtl_display_hz(void) {
 #ifdef _WIN32
+    const char *fps60 = getenv("TOTK_FPS60"), *pace = getenv("TOTK_PACE_FPS");
+    if (!(fps60 && atoi(fps60) > 0) && !(pace && atoi(pace) > 0)) return 60;
     DEVMODEW dm;
     memset(&dm, 0, sizeof dm);
     dm.dmSize = sizeof dm;
