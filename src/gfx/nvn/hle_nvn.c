@@ -922,7 +922,9 @@ NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     pthread_mutex_unlock(&g_copy_mu);
     if (cmdlog_env()) LOG("[cmd] EndRecording cb=%p recorded=%p copy=%p ctl=%p", (void *)c, (void *)o->seg, (void *)copy, o->ctl);
     if (totk_life_on() && totk_life_cb_take(c)) { totk_life_log("end cb=%p handle=%p", (void *)c, (void *)copy); totk_life_handle_add((uint64_t)(uintptr_t)copy); }
-    if (getenv("TOTK_CHAIN_LOG")) { static int n; if (n++ < 200) guest_chain("EndRecording"); }
+    static int chain_log = -1;   // getenv on every EndRecording was ~1% of the CPU at 144 fps (strchr in ucrt)
+    if (chain_log < 0) chain_log = getenv("TOTK_CHAIN_LOG") != NULL;
+    if (chain_log) { static int n; if (n++ < 200) guest_chain("EndRecording"); }
     return (NVNcommandHandle)copy;
 }
 NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->recording != 0; }

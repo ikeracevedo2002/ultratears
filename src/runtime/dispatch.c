@@ -134,7 +134,7 @@ GuestFn dispatch_lookup(uint64_t addr) {
 }
 
 // Small direct-mapped cache in front of the binary search
-#define DCACHE 4096
+#define DCACHE 16384   // 4096 missed often enough at 144 fps for the binary search to show in profiles (0.6%)
 static __thread struct { uint64_t addr; GuestFn fn; } dcache[DCACHE];
 
 static GuestFn dispatch_slow(Cpu *c) {
