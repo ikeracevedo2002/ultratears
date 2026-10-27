@@ -145,10 +145,13 @@ def main():
             lines.append(f'build {obj}: gamecc {rel(c)}')
             text = c.read_text(errors='replace')
             # [temporary] a function with an unresolved computed branch is one switch over every
-            # instruction; with thousands of labels clang -O1/-O2 takes from minutes to hours per file (main_376:
-            # 20+ min at -O1), -O0 15 s. Such functions run unoptimized until their tables resolve.
+            # instruction; with thousands of labels clang -O2 took from minutes to hours per file (main_376 before
+            # its tables resolved: 20+ min at -O1). Those files get -O1. They were -O0 until 2026-10-26: at -O0
+            # main_820's f_801547400 (a hot interpreter of the game's worker threads) had an 8.3 MiB stack frame
+            # that __chkstk probed page by page on every call, 5% of all CPU samples at 144 fps; at -O1 the frame is
+            # 0.4 MiB. The eight such files of 1.4.3 take 2 s to 5 min each at -O1 (main_830 the longest).
             if 'L_dispatch:' in text and text.count(chr(10) + 'L_') > 2000:
-                lines.append('  gameflags = ' + GAME_CFLAGS.replace('-O2', '-O0'))
+                lines.append('  gameflags = ' + GAME_CFLAGS.replace('-O2', '-O1'))
             game_objs.append(obj)
     if not game_objs:
         sys.exit(f'no generated C in {gen}: run tools/gen_game.py first')
